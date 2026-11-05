@@ -66,6 +66,7 @@ static void flush(lv_display_t* d,const lv_area_t* a,uint8_t* colors) {
 }
 static uint32_t ticks(){return millis();}
 static void setupChannelGraph();
+static void setupPacketGraph();
 static void initDisplay(){
   pinMode(BACKLIGHT,OUTPUT); digitalWrite(BACKLIGHT,HIGH);
   spi_bus_config_t bus=ST7735_PANEL_BUS_SPI_CONFIG(5,3,160*80*2);
@@ -114,6 +115,7 @@ static void initDisplay(){
   lv_obj_add_flag(footLabel,LV_OBJ_FLAG_HIDDEN); // no navigation help
   lv_label_set_text(titleLabel,"WesPen USB");
   setupChannelGraph();
+  setupPacketGraph();
   lv_label_set_text(bodyLabel,"Display online");
   lv_timer_handler();
   digitalWrite(BACKLIGHT,LOW);
@@ -125,6 +127,38 @@ static QueueHandle_t frameQueue=nullptr;
 static File pcap;
 static bool sdOK=false, monitorOn=false;
 static volatile uint32_t rxFrames=0,eapolFrames=0,deauthFrames=0,disassocFrames=0,beacons=0,dropped=0;
+// Live packet statistics: counters are updated in the WiFi receive callback.
+static volatile uint32_t rxByteTotal=0;
+static volatile uint32_t mgmtFrameTotal=0, dataFrameTotal=0, ctrlFrameTotal=0;
+static uint32_t packetPreviousRx=0, packetPreviousBytes=0;
+static uint32_t packetRate=0, byteRate=0, packetSampleAt=0, packetPageAt=0;
+static uint8_t packetHistory[16]={0};
+static bool packetShowTypes=false;
+static lv_obj_t* packetBars[16]={nullptr};
+static void showPacketGraph(bool visible);
+static void updatePacketGraph();
+static void resetPacketStats(){
+  rxByteTotal=0;mgmtFrameTotal=0;dataFrameTotal=0;ctrlFrameTotal=0;
+  packetPreviousRx=0;packetPreviousBytes=0;packetRate=0;byteRate=0;
+  memset(packetHistory,0,sizeof(packetHistory));
+  packetSampleAt=millis();packetPageAt=millis();packetShowTypes=false;
+}
+static void pollPacketStats(){
+  if(packetSampleAt==0)packetSampleAt=millis();
+  const uint32_t now=millis();
+  if(now-packetSampleAt<1000)return;
+  // Account for elapsed time even if the UI is temporarily busy.
+  const uint32_t elapsed=now-packetSampleAt;
+  const uint32_t newRx=rxFrames, newBytes=rxByteTotal;
+  packetRate=(uint32_t)((uint64_t)(newRx-packetPreviousRx)*1000/elapsed);
+  byteRate=(uint32_t)((uint64_t)(newBytes-packetPreviousBytes)*1000/elapsed);
+  packetPreviousRx=newRx;packetPreviousBytes=newBytes;packetSampleAt=now;
+  for(int i=0;i<15;i++)packetHistory[i]=packetHistory[i+1];
+  // Compressed display scale: one bar step for ~10 packets/sec.
+  packetHistory[15]=(uint8_t)min(255UL,(unsigned long)(packetRate/10));
+  // Keep live packet graph permanently visible
+}
+
 static uint32_t savedFrames=0;
 static int channel=1,networks=0,bleCount=0;
 static int counts[14]={0};
@@ -220,6 +254,34 @@ static void pollTraffic(){
 static lv_obj_t* channelBars[13]={nullptr};
 static const int CH_GRAPH_X=8, CH_GRAPH_BOTTOM=79;
 static constexpr int CH_BAR_W=8, CH_BAR_STEP=11, CH_GRAPH_MAX_H=20;
+// 16 compact bars; visible only in the packet monitor's live graph view.
+static void setupPacketGraph(){
+  lv_obj_t* root=lv_screen_active();
+  for(int i=0;i<16;i++){
+    packetBars[i]=lv_obj_create(root);
+    lv_obj_remove_style_all(packetBars[i]);
+    lv_obj_set_style_bg_opa(packetBars[i],LV_OPA_COVER,0);
+    lv_obj_set_style_bg_color(packetBars[i],lv_color_hex(0xA855F7),0);
+    lv_obj_set_pos(packetBars[i],8+i*9,78);
+    lv_obj_set_size(packetBars[i],6,1);
+    lv_obj_add_flag(packetBars[i],LV_OBJ_FLAG_HIDDEN);
+  }
+}
+static void showPacketGraph(bool visible){
+  for(auto* bar:packetBars)if(bar){
+    if(visible)lv_obj_remove_flag(bar,LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(bar,LV_OBJ_FLAG_HIDDEN);
+  }
+}
+static void updatePacketGraph(){
+  int peak=1;
+  for(uint8_t v:packetHistory)if(v>peak)peak=v;
+  for(int i=0;i<16;i++){
+    int h=packetHistory[i]?max(2,(int)packetHistory[i]*17/peak):1;
+    lv_obj_set_pos(packetBars[i],8+i*9,79-h);
+    lv_obj_set_size(packetBars[i],6,h);
+  }
+}
 static void setupChannelGraph(){
   lv_obj_t* root=lv_screen_active();
   for(int i=0;i<13;i++){
@@ -309,20 +371,24 @@ static void onRx(void* raw,wifi_promiscuous_pkt_type_t type){
   if(!raw||type==WIFI_PKT_MISC)return;
   auto* p=(wifi_promiscuous_pkt_t*)raw;
   int n=p->rx_ctrl.sig_len;
-  if(n<24 || n>2304)return;
+  if(n<2 || n>2304)return;
   const uint8_t* b=p->payload;
   int frameType=(b[0]>>2)&3, sub=(b[0]>>4)&15;
   bool beacon=(frameType==0 && sub==8);
   bool deauth=(frameType==0 && sub==12);
   bool disassoc=(frameType==0 && sub==10);
   bool eapol=false;
-  if(frameType==2 && !(b[1]&0x40)){
+  if(n>=24 && frameType==2 && !(b[1]&0x40)){
     int hdr=24+(((b[1]&3)==3)?6:0)+((sub&8)?2:0);
     if((sub&8)&&(b[1]&0x80))hdr+=4;
     if(n>=hdr+8 && b[hdr]==0xaa && b[hdr+1]==0xaa && b[hdr+2]==3 &&
        b[hdr+6]==0x88 && b[hdr+7]==0x8e)eapol=true;
   }
   ++rxFrames;
+  rxByteTotal+=(uint32_t)n;
+  if(frameType==0)++mgmtFrameTotal;
+  else if(frameType==1)++ctrlFrameTotal;
+  else if(frameType==2)++dataFrameTotal;
   if(beacon)++beacons;
   if(deauth)++deauthFrames;
   if(disassoc)++disassocFrames;
@@ -344,7 +410,7 @@ static void stopMonitor(){
 }
 static void startMonitor(){
   WiFi.mode(WIFI_STA);WiFi.disconnect(false,true);
-  wifi_promiscuous_filter_t f={};f.filter_mask=WIFI_PROMIS_FILTER_MASK_MGMT|WIFI_PROMIS_FILTER_MASK_DATA;
+  wifi_promiscuous_filter_t f={};f.filter_mask=WIFI_PROMIS_FILTER_MASK_MGMT|WIFI_PROMIS_FILTER_MASK_DATA|WIFI_PROMIS_FILTER_MASK_CTRL;
   esp_wifi_set_promiscuous_filter(&f);
   esp_wifi_set_promiscuous_rx_cb(onRx);
   openCapture();
@@ -440,6 +506,7 @@ static void resetMonitorCounters(){
   previousDeauth=0;
   alertUntil=0;
   lastLog=millis();
+  resetPacketStats();
 }
 static void enter(Page p){
   stopTraffic();
@@ -448,6 +515,7 @@ static void enter(Page p){
   if(isMonitorPage(oldPage) || isMonitorPage(p))resetMonitorCounters();
   page=p;
   showChannelGraph(p==CHANNELS);
+  showPacketGraph(p==MONITOR);
   if(p==WIFI_PAGE || p==SELECT_AP) {
     scanWiFi();
     if(p==SELECT_AP) selectedAP=0;
@@ -458,6 +526,25 @@ static void enter(Page p){
 }
 static void draw(){
   char b[110];
+  if(page==MONITOR){
+    // Auto alternate between the traffic graph and frame-type totals.
+    showPacketGraph(!packetShowTypes);
+    lv_obj_set_pos(bodyLabel,8,26);
+    lv_obj_set_size(bodyLabel,144,47);
+    if(packetShowTypes){
+      lv_label_set_text(titleLabel,"Frames / CH");
+      snprintf(b,sizeof(b),"CH%d M:%lu C:%lu\nD:%lu E:%lu",channel,
+        (unsigned long)mgmtFrameTotal,(unsigned long)ctrlFrameTotal,
+        (unsigned long)dataFrameTotal,(unsigned long)eapolFrames);
+    }else{
+      lv_label_set_text(titleLabel,"Live packets");
+      snprintf(b,sizeof(b),"CH%d %lu pkt/s\n%lu B/s",channel,
+        (unsigned long)packetRate,(unsigned long)byteRate);
+      updatePacketGraph();
+    }
+    lv_label_set_text(bodyLabel,b);
+    return;
+  }
   if(page==CHANNELS){
     lv_label_set_text(titleLabel,"Traffic / CH");
     channelAdvice(b,sizeof(b));
@@ -513,7 +600,11 @@ static void tap(){
   else if(page==SELECT_AP)selectedAP=(selectedAP+1)%(wifiItemCount+1);
   else if(page==BLE_PAGE){if(bleItemCount)listOffset=(listOffset+1)%bleItemCount;lastListMove=millis();}
   else if(page==STORAGE){SD_MMC.end();sdOK=SD_MMC.begin("/sdcard",false);}
-  else {stopMonitor();channel=channel==11?1:channel+1;startMonitor();}
+  else {
+    stopMonitor();channel=channel==11?1:channel+1;
+    if(isMonitorPage(page))resetMonitorCounters();
+    startMonitor();
+  }
   draw();
 }
 static void hold(){
@@ -558,6 +649,8 @@ static void updateLed(uint32_t now){
   }else if(page==STORAGE){
     if(sdOK)ledRGB(0,wave,0);    // green: SD mounted
     else ledRGB(wave/2,0,0);     // subdued red: SD missing
+  }else if(page==MONITOR){
+    ledRGB(wave/2,0,wave);        // purple pulse in packet monitor
   }else if(page==EAPOL_PAGE){
     ledRGB(wave,wave/2,0);        // amber: EAPOL receive mode
   }else if(page==DEAUTH_PAGE){
@@ -593,6 +686,7 @@ void setup(){
 void loop(){
   pollBoot();pollTraffic();drainQueue();
   uint32_t now=millis();
+  if(page==MONITOR)pollPacketStats();
   if(page==WIFI_PAGE || page==BLE_PAGE){
     const int count=page==WIFI_PAGE?wifiItemCount:bleItemCount;
     if(count>1 && now-lastListMove>=LIST_ADVANCE_MS){
