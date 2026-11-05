@@ -2,11 +2,11 @@
 
 **An open-source ESP32-S3 WiFi and Bluetooth Low Energy (BLE) security analyzer for the LILYGO T-Dongle S3.**
 
-WesPen USB is a compact, passive WiFi and Bluetooth analysis tool built for the standard **LILYGO T-Dongle S3** (not the Plus version). It features a 160×80 ST7735 color display, BOOT-button navigation, optional microSD packet captures, and dynamic RGB LED indicators.
+WesPen USB is a compact, passive WiFi and Bluetooth analysis tool built for the standard **LILYGO T-Dongle S3** (not the Plus version). It features a 160×80 ST7735 color display, BOOT-button navigation, optional microSD packet captures, and dynamic RGB LED indicators. This repo shows the power of mini tools. FOR EDUCATIONAL PURPOSES ONLY, OR IN ENVIRONMENTS WHERE EXPLICIT PERMISSION HAS BEEN GRANTED.
 
 This project was developed with the assistance of **OpenAI ChatGPT**, combining custom firmware, hardware integration, and WiFi security analysis capabilities into a portable USB-sized device.
 
-> **Project Status:** Version 3 (v3) combines the latest working firmware with the Channel Traffic and Channel Advice updates. This GitHub release has **not yet been independently recompiled or fully validated on physical hardware**. Build and test the firmware before publishing an official release.
+> **Project Status:** Version 3 (v3) combines the latest working firmware with the Channel Traffic and Channel Advice updates. Some texts on the display are not optimised for the screen. Use this repo to make changes your self. 
 
 ## Features
 
