@@ -1,4 +1,4 @@
-# WesPen USB — Built with ChatGPT | LILYGO T-Dongle S3 WiFi & BLE Tool
+#  WesPen USB - a LILYGO T-Dongle S3 WiFi & BLE Tool — Built with ChatGPT
 
 **An open-source ESP32-S3 WiFi and Bluetooth Low Energy (BLE) security analyzer for the LILYGO T-Dongle S3.**
 
